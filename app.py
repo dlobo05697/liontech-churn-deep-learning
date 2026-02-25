@@ -240,4 +240,3 @@ if st.button("Entrenar modelo"):
         "prob_churn": probs
     }).sort_values("prob_churn", ascending=False)
     st.dataframe(risk_df.head(10))
-```
