@@ -11,7 +11,6 @@ import torch.nn as nn
 import torch.optim as optim
 
 from sklearn.model_selection import train_test_split
-from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     accuracy_score,
@@ -32,8 +31,8 @@ st.set_page_config(
 
 st.title("Predicción del Comportamiento de Clientes utilizando Redes Neuronales Profundas")
 st.caption(
-    "Aplicación demostrativa y productiva (Materia 4). "
-    "Pipeline real de ingeniería de datos + MLP (PyTorch)."
+    "Aplicación con pipeline real de ingeniería de datos y modelo MLP (PyTorch). "
+    "Modo demostración y modo productivo con archivos TXT."
 )
 
 # =========================
@@ -41,7 +40,7 @@ st.caption(
 # =========================
 st.subheader("Modo de ejecución")
 modo = st.radio(
-    "Seleccione el modo de uso de la aplicación:",
+    "Seleccione el modo de uso:",
     ["Demostración académica", "Carga de archivos (avanzado)"],
     index=0
 )
@@ -115,15 +114,16 @@ def normalize_tx(df):
 
     df["CodCliente"] = df["CodCliente"].astype(str).str.strip()
     df["Documento"] = df["Documento"].astype(str).str.strip()
-    df["FechaEmision"] = pd.to_datetime(df["FechaEmision"], errors="coerce")
+    df["Operacion"] = df["Operacion"].astype(str).str.upper().str.strip()
 
+    df["FechaEmision"] = pd.to_datetime(df["FechaEmision"], errors="coerce")
     df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce").fillna(0)
     df["Preciounitario"] = pd.to_numeric(
         df["Preciounitario"].astype(str).str.replace(",", "."),
         errors="coerce"
     ).fillna(0)
 
-    df = df[df["Operacion"].str.upper() == "FACTURA"].copy()
+    df = df[df["Operacion"] == "FACTURA"].copy()
     df["line_total"] = df["Cantidad"] * df["Preciounitario"]
 
     return df
@@ -151,7 +151,7 @@ def build_customer_features(dec_df, jan_df, feb_df):
 
     cutoff = jan_i["FechaEmision"].max()
 
-    base = pd.concat([dec_i, jan_i])
+    base = pd.concat([dec_i, jan_i], ignore_index=True)
 
     cust = base.groupby("CodCliente", as_index=False).agg(
         frequency=("Documento", "nunique"),
@@ -168,7 +168,8 @@ def build_customer_features(dec_df, jan_df, feb_df):
     dec_sales = dec_i.groupby("CodCliente", as_index=False)["invoice_total"].sum().rename(columns={"invoice_total": "dec"})
     jan_sales = jan_i.groupby("CodCliente", as_index=False)["invoice_total"].sum().rename(columns={"invoice_total": "jan"})
 
-    cust = cust.merge(dec_sales, on="CodCliente", how="left").merge(jan_sales, on="CodCliente", how="left")
+    cust = cust.merge(dec_sales, on="CodCliente", how="left")
+    cust = cust.merge(jan_sales, on="CodCliente", how="left")
     cust[["dec", "jan"]] = cust[["dec", "jan"]].fillna(0)
 
     cust["trend_abs"] = cust["jan"] - cust["dec"]
@@ -190,9 +191,8 @@ cutoff_display = "Demo"
 if modo == "Demostración académica":
     st.success("Modo demostración académica activo.")
     df_model = load_demo_dataset()
-
 else:
-    st.info("Modo avanzado: cargue los tres TXT.")
+    st.info("Modo avanzado: cargue los tres archivos TXT.")
     dec_file = st.file_uploader("Diciembre (TXT)", type="txt")
     jan_file = st.file_uploader("Enero (TXT)", type="txt")
     feb_file = st.file_uploader("Febrero (TXT)", type="txt")
@@ -217,6 +217,9 @@ c1.metric("Clientes", len(df_model))
 c2.metric("Churn rate", f"{df_model['churn'].mean()*100:.2f}%")
 c3.metric("Corte", cutoff_display)
 
+with st.expander("Vista rápida de datos"):
+    st.dataframe(df_model.head())
+
 # =========================
 # ENTRENAMIENTO
 # =========================
@@ -232,16 +235,21 @@ sample_size = st.slider(
 if st.button("Entrenar modelo"):
     df_train = df_model.sample(sample_size, random_state=42)
 
-  client_ids = df_train["CodCliente"] if "CodCliente" in df_train.columns else None
+    client_ids = df_train["CodCliente"] if "CodCliente" in df_train.columns else None
 
-X = df_train.drop(columns=["churn", "CodCliente"], errors="ignore")
-y = df_train["churn"].values
+    X = df_train.drop(columns=["churn", "CodCliente"], errors="ignore")
+    y = df_train["churn"].values
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
+    strat = y if len(np.unique(y)) == 2 else None
     X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y, test_size=0.3, random_state=42, stratify=y if len(np.unique(y)) == 2 else None
+        X_scaled,
+        y,
+        test_size=0.3,
+        random_state=42,
+        stratify=strat
     )
 
     X_train = torch.tensor(X_train, dtype=torch.float32)
@@ -250,10 +258,10 @@ y = df_train["churn"].values
     y_test = torch.tensor(y_test.reshape(-1, 1), dtype=torch.float32)
 
     class MLP(nn.Module):
-        def __init__(self, n):
+        def __init__(self, n_features):
             super().__init__()
             self.net = nn.Sequential(
-                nn.Linear(n, 64),
+                nn.Linear(n_features, 64),
                 nn.ReLU(),
                 nn.Dropout(0.3),
                 nn.Linear(64, 32),
@@ -269,7 +277,8 @@ y = df_train["churn"].values
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    train_losses, val_losses = [], []
+    train_losses = []
+    val_losses = []
 
     for _ in range(12):
         model.train()
@@ -307,11 +316,15 @@ y = df_train["churn"].values
     m5.metric("ROC-AUC", f"{auc:.3f}" if not np.isnan(auc) else "N/A")
 
     st.subheader("Curvas de pérdida")
-    st.line_chart(pd.DataFrame({"train": train_losses, "val": val_losses}))
+    st.line_chart(pd.DataFrame({
+        "train_loss": train_losses,
+        "val_loss": val_losses
+    }))
 
     st.subheader("Top clientes con mayor riesgo")
-    st.dataframe(
-        pd.DataFrame({"prob_churn": probs})
-        .sort_values("prob_churn", ascending=False)
-        .head(10)
-    )
+    risk_df = pd.DataFrame({
+        "CodCliente": client_ids.iloc[:len(probs)].values if client_ids is not None else np.arange(len(probs)),
+        "prob_churn": probs
+    }).sort_values("prob_churn", ascending=False)
+
+    st.dataframe(risk_df.head(10))
