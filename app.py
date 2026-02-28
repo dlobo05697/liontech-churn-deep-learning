@@ -14,17 +14,27 @@ from sklearn.model_selection import train_test_split
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score,
-    f1_score, roc_auc_score, confusion_matrix
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    confusion_matrix
 )
 
 # =========================
 # PAGE CONFIG
 # =========================
-st.set_page_config(page_title="Lion Tech | Churn (Deep Learning)", layout="wide")
+st.set_page_config(
+    page_title="Lion Tech | Churn (Deep Learning)",
+    layout="wide"
+)
 
 st.title("Predicción del Comportamiento de Clientes utilizando Redes Neuronales Profundas")
-st.caption("App (Materia 4). Modo demostración + modo avanzado (producción) con TXT Dic/Ene/Feb. Modelo: MLP (PyTorch).")
+st.caption(
+    "Aplicación demostrativa y productiva (Materia 4). "
+    "Pipeline real de ingeniería de datos + MLP (PyTorch)."
+)
 
 # =========================
 # MODO DE EJECUCIÓN
@@ -37,17 +47,10 @@ modo = st.radio(
 )
 
 # =========================
-# UTILIDADES GENERALES
+# UTILIDADES
 # =========================
-def read_any_delim(uploaded_file_or_path):
-    """Lee TXT/CSV con separador desconocido (coma o tab) desde uploader o ruta."""
-    if hasattr(uploaded_file_or_path, "read"):
-        raw = uploaded_file_or_path.read()
-    else:
-        with open(uploaded_file_or_path, "rb") as f:
-            raw = f.read()
-
-    # Intentos de decodificación robustos
+def read_any_delim(uploaded_file):
+    raw = uploaded_file.read()
     try:
         text = raw.decode("latin1", errors="ignore")
     except Exception:
@@ -62,27 +65,26 @@ def read_any_delim(uploaded_file_or_path):
 
 
 def load_demo_dataset():
-    """Dataset demo académico (anonimizado y reproducible)."""
     np.random.seed(42)
     n = 120
 
-    frequency = np.random.poisson(lam=4, size=n)
-    monetary_total = np.random.gamma(shape=2.0, scale=300, size=n)
+    frequency = np.random.poisson(4, n)
+    monetary_total = np.random.gamma(2.0, 300, n)
     ticket_avg = monetary_total / np.maximum(frequency, 1)
-    ticket_max = ticket_avg * np.random.uniform(1.1, 1.6, size=n)
-    ticket_min = ticket_avg * np.random.uniform(0.6, 0.9, size=n)
+    ticket_max = ticket_avg * np.random.uniform(1.1, 1.6, n)
+    ticket_min = ticket_avg * np.random.uniform(0.6, 0.9, n)
 
-    num_productos = np.random.randint(1, 10, size=n)
-    num_familias = np.random.randint(1, 6, size=n)
-    num_marcas = np.random.randint(1, 5, size=n)
+    num_productos = np.random.randint(1, 10, n)
+    num_familias = np.random.randint(1, 6, n)
+    num_marcas = np.random.randint(1, 5, n)
 
-    dec = monetary_total * np.random.uniform(0.4, 0.6, size=n)
-    jan = monetary_total * np.random.uniform(0.4, 0.6, size=n)
+    dec = monetary_total * np.random.uniform(0.4, 0.6, n)
+    jan = monetary_total * np.random.uniform(0.4, 0.6, n)
 
     trend_abs = jan - dec
-    trend_pct = trend_abs / np.maximum(dec, 1)
+    trend_pct = np.where(dec > 0, trend_abs / dec, 0)
 
-    recency_days = np.random.randint(1, 60, size=n)
+    recency_days = np.random.randint(1, 60, n)
 
     churn = (
         (recency_days > 30).astype(int)
@@ -107,164 +109,78 @@ def load_demo_dataset():
         "churn": churn
     })
 
-# =========================
-# PIPELINE PRODUCCIÓN (TXT -> Features Cliente -> Churn)
-# =========================
-def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out.columns = [str(c).strip() for c in out.columns]
-    return out
 
-def _find_col(df: pd.DataFrame, aliases: list[str]) -> str:
-    """Encuentra columna por alias (case-insensitive). Lanza error si no existe."""
-    cols = {c.strip().upper(): c for c in df.columns}
-    for a in aliases:
-        key = a.strip().upper()
-        if key in cols:
-            return cols[key]
-    raise ValueError(f"No se encontró columna. Se esperaba una de: {aliases}. Disponibles: {list(df.columns)}")
+def normalize_tx(df):
+    df.columns = [c.strip() for c in df.columns]
 
-def _clean_str_series(s: pd.Series) -> pd.Series:
-    return (
-        s.astype(str)
-        .str.replace('"', '', regex=False)
-        .str.strip()
-        .str.upper()
-        .replace({"NAN": np.nan, "NONE": np.nan, "": np.nan})
-    )
+    df["CodCliente"] = df["CodCliente"].astype(str).str.strip()
+    df["Documento"] = df["Documento"].astype(str).str.strip()
+    df["FechaEmision"] = pd.to_datetime(df["FechaEmision"], errors="coerce")
 
-def _to_float(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(
-        s.astype(str).str.replace(",", ".", regex=False),
+    df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce").fillna(0)
+    df["Preciounitario"] = pd.to_numeric(
+        df["Preciounitario"].astype(str).str.replace(",", "."),
         errors="coerce"
-    )
+    ).fillna(0)
 
-def normalize_tx(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normaliza el TXT a un esquema común.
-    Requiere (con alias típicos):
-      FechaEmision, CodCliente, Documento, Cantidad, Preciounitario, Operacion,
-      CodProducto, CodFamilia, CodMarca
-    """
-    df = _norm_cols(df)
+    df = df[df["Operacion"].str.upper() == "FACTURA"].copy()
+    df["line_total"] = df["Cantidad"] * df["Preciounitario"]
 
-    col_fecha = _find_col(df, ["FechaEmision", "Fecha Emision", "Fecha", "FECHAEMISION", "FECHA"])
-    col_cliente = _find_col(df, ["CodCliente", "CodigoCliente", "Cliente", "CODCLIENTE", "COD_CLIENTE"])
-    col_doc = _find_col(df, ["Documento", "Doc", "Factura", "NroDocumento", "Nro Doc", "DOCUMENTO"])
-    col_qty = _find_col(df, ["Cantidad", "Cant", "Qty", "CANTIDAD"])
-    col_pu = _find_col(df, ["Preciounitario", "PrecioUnitario", "Precio", "PUnit", "PRECIOUNITARIO", "PRECIO_UNITARIO"])
-    col_op = _find_col(df, ["Operacion", "Operación", "TipoOperacion", "TIPO", "OPERACION"])
+    return df
 
-    # Estos tres pueden variar más; igual los buscamos con alias razonables
-    col_prod = _find_col(df, ["CodProducto", "CodigoProducto", "Producto", "CODPRODUCTO", "COD_PRODUCTO"])
-    col_fam = _find_col(df, ["CodFamilia", "CodigoFamilia", "Familia", "CODFAMILIA", "COD_FAMILIA"])
-    col_brand = _find_col(df, ["CodMarca", "CodigoMarca", "Marca", "CODMARCA", "COD_MARCA"])
 
-    out = pd.DataFrame({
-        "FechaEmision": df[col_fecha],
-        "CodCliente": df[col_cliente],
-        "Documento": df[col_doc],
-        "Cantidad": df[col_qty],
-        "Preciounitario": df[col_pu],
-        "Operacion": df[col_op],
-        "CodProducto": df[col_prod],
-        "CodFamilia": df[col_fam],
-        "CodMarca": df[col_brand],
-    })
+def build_customer_features(dec_df, jan_df, feb_df):
+    dec = normalize_tx(dec_df)
+    jan = normalize_tx(jan_df)
+    feb = normalize_tx(feb_df)
 
-    out["CodCliente"] = _clean_str_series(out["CodCliente"])
-    out["Documento"] = _clean_str_series(out["Documento"])
-    out["Operacion"] = _clean_str_series(out["Operacion"])
-
-    out["FechaEmision"] = pd.to_datetime(out["FechaEmision"], errors="coerce")
-    out["Cantidad"] = _to_float(out["Cantidad"]).fillna(0)
-    out["Preciounitario"] = _to_float(out["Preciounitario"]).fillna(0)
-
-    out["CodProducto"] = _to_float(out["CodProducto"]).fillna(0).astype(int)
-    out["CodFamilia"] = _to_float(out["CodFamilia"]).fillna(0).astype(int)
-    out["CodMarca"] = _to_float(out["CodMarca"]).fillna(0).astype(int)
-
-    # Filtra por facturas (si tu sistema usa otro valor, cámbialo aquí)
-    out = out[out["Operacion"].eq("FACTURA")].copy()
-
-    out["line_amount_usd"] = out["Cantidad"] * out["Preciounitario"]
-
-    out = out.dropna(subset=["CodCliente", "FechaEmision", "Documento"])
-    out = out[out["CodCliente"].notna()]
-
-    return out
-
-def invoices_from_tx(tx: pd.DataFrame) -> pd.DataFrame:
-    inv = (
-        tx.groupby(["CodCliente", "Documento", "FechaEmision"], as_index=False)
-          .agg(
-              invoice_total_usd=("line_amount_usd", "sum"),
-              lines=("line_amount_usd", "size"),
-              qty=("Cantidad", "sum"),
-              prod_n=("CodProducto", pd.Series.nunique),
-              fam_n=("CodFamilia", pd.Series.nunique),
-              brand_n=("CodMarca", pd.Series.nunique),
-          )
-    )
-    inv["invoice_total_usd"] = inv["invoice_total_usd"].clip(lower=0)
-    return inv
-
-def build_customer_features(dec_df: pd.DataFrame, jan_df: pd.DataFrame, feb_df: pd.DataFrame):
-    dec_tx = normalize_tx(dec_df)
-    jan_tx = normalize_tx(jan_df)
-    feb_tx = normalize_tx(feb_df)
-
-    dec_inv = invoices_from_tx(dec_tx)
-    jan_inv = invoices_from_tx(jan_tx)
-    feb_inv = invoices_from_tx(feb_tx)
-
-    cutoff = jan_inv["FechaEmision"].max()
-    if pd.isna(cutoff):
-        raise ValueError("Enero no tiene fechas válidas para calcular recency/cutoff.")
-
-    base_inv = pd.concat([dec_inv, jan_inv], ignore_index=True)
-
-    cust = (
-        base_inv.groupby("CodCliente", as_index=False)
-        .agg(
-            frequency=("Documento", "nunique"),
-            monetary_total=("invoice_total_usd", "sum"),
-            ticket_avg=("invoice_total_usd", "mean"),
-            ticket_max=("invoice_total_usd", "max"),
-            ticket_min=("invoice_total_usd", "min"),
-            num_productos=("prod_n", "sum"),
-            num_familias=("fam_n", "sum"),
-            num_marcas=("brand_n", "sum"),
-            last_purchase=("FechaEmision", "max"),
+    def invoices(tx):
+        return tx.groupby(
+            ["CodCliente", "Documento", "FechaEmision"],
+            as_index=False
+        ).agg(
+            invoice_total=("line_total", "sum"),
+            prod_n=("CodProducto", "nunique"),
+            fam_n=("CodFamilia", "nunique"),
+            brand_n=("CodMarca", "nunique")
         )
+
+    dec_i = invoices(dec)
+    jan_i = invoices(jan)
+    feb_i = invoices(feb)
+
+    cutoff = jan_i["FechaEmision"].max()
+
+    base = pd.concat([dec_i, jan_i])
+
+    cust = base.groupby("CodCliente", as_index=False).agg(
+        frequency=("Documento", "nunique"),
+        monetary_total=("invoice_total", "sum"),
+        ticket_avg=("invoice_total", "mean"),
+        ticket_max=("invoice_total", "max"),
+        ticket_min=("invoice_total", "min"),
+        num_productos=("prod_n", "sum"),
+        num_familias=("fam_n", "sum"),
+        num_marcas=("brand_n", "sum"),
+        last_purchase=("FechaEmision", "max")
     )
 
-    dec_sales = dec_inv.groupby("CodCliente", as_index=False).agg(dec=("invoice_total_usd", "sum"))
-    jan_sales = jan_inv.groupby("CodCliente", as_index=False).agg(jan=("invoice_total_usd", "sum"))
+    dec_sales = dec_i.groupby("CodCliente", as_index=False)["invoice_total"].sum().rename(columns={"invoice_total": "dec"})
+    jan_sales = jan_i.groupby("CodCliente", as_index=False)["invoice_total"].sum().rename(columns={"invoice_total": "jan"})
 
     cust = cust.merge(dec_sales, on="CodCliente", how="left").merge(jan_sales, on="CodCliente", how="left")
-    cust["dec"] = cust["dec"].fillna(0.0)
-    cust["jan"] = cust["jan"].fillna(0.0)
+    cust[["dec", "jan"]] = cust[["dec", "jan"]].fillna(0)
 
     cust["trend_abs"] = cust["jan"] - cust["dec"]
-    cust["trend_pct"] = np.where(cust["dec"] > 0, cust["trend_abs"] / cust["dec"], 0.0)
-
+    cust["trend_pct"] = np.where(cust["dec"] > 0, cust["trend_abs"] / cust["dec"], 0)
     cust["recency_days"] = (cutoff - cust["last_purchase"]).dt.days.clip(lower=0)
 
-    feb_active = set(feb_inv["CodCliente"].unique())
-    cust["churn"] = cust["CodCliente"].apply(lambda c: 0 if c in feb_active else 1).astype(int)
+    active_feb = set(feb_i["CodCliente"].unique())
+    cust["churn"] = cust["CodCliente"].apply(lambda x: 0 if x in active_feb else 1)
 
-    # Limpieza numérica
-    num_cols = [
-        "frequency", "monetary_total", "ticket_avg", "ticket_max", "ticket_min",
-        "num_productos", "num_familias", "num_marcas",
-        "dec", "jan", "trend_abs", "trend_pct", "recency_days"
-    ]
-    for c in num_cols:
-        cust[c] = pd.to_numeric(cust[c], errors="coerce").fillna(0)
-
-    cust = cust.drop(columns=["last_purchase"], errors="ignore")
+    cust.drop(columns=["last_purchase"], inplace=True)
     return cust, cutoff
+
 
 # =========================
 # CARGA DE DATOS
@@ -272,55 +188,43 @@ def build_customer_features(dec_df: pd.DataFrame, jan_df: pd.DataFrame, feb_df: 
 cutoff_display = "Demo"
 
 if modo == "Demostración académica":
-    st.success("Modo demostración académica activo. Dataset cargado automáticamente.")
-    st.info("Este modo utiliza un dataset académico anonimizado y embebido para validar el modelo sin cargar archivos externos.")
+    st.success("Modo demostración académica activo.")
     df_model = load_demo_dataset()
 
 else:
-    st.info("Modo avanzado: carga manual de archivos.")
-    dec_file = st.file_uploader("Diciembre (TXT)", type=["txt"])
-    jan_file = st.file_uploader("Enero (TXT)", type=["txt"])
-    feb_file = st.file_uploader("Febrero (TXT)", type=["txt"])
+    st.info("Modo avanzado: cargue los tres TXT.")
+    dec_file = st.file_uploader("Diciembre (TXT)", type="txt")
+    jan_file = st.file_uploader("Enero (TXT)", type="txt")
+    feb_file = st.file_uploader("Febrero (TXT)", type="txt")
 
     if not (dec_file and jan_file and feb_file):
-        st.warning("Debe cargar los tres archivos para continuar.")
         st.stop()
 
     dec_df = read_any_delim(dec_file)
     jan_df = read_any_delim(jan_file)
     feb_df = read_any_delim(feb_file)
 
-    try:
-        df_model, cutoff_dt = build_customer_features(dec_df, jan_df, feb_df)
-        cutoff_display = str(pd.to_datetime(cutoff_dt).date())
-    except Exception as e:
-        st.error(f"Error en pipeline avanzado: {e}")
-        st.stop()
-
-    st.success("Pipeline avanzado ejecutado: features a nivel cliente listos para entrenar.")
+    df_model, cutoff_dt = build_customer_features(dec_df, jan_df, feb_df)
+    cutoff_display = str(cutoff_dt.date())
+    st.success("Pipeline de producción ejecutado correctamente.")
 
 # =========================
 # DATASET INFO
 # =========================
 st.subheader("Dataset a nivel cliente")
-
 c1, c2, c3 = st.columns(3)
 c1.metric("Clientes", len(df_model))
 c2.metric("Churn rate", f"{df_model['churn'].mean()*100:.2f}%")
-c3.metric("Corte (recency)", cutoff_display)
-
-with st.expander("Vista rápida de datos"):
-    st.dataframe(df_model.head())
+c3.metric("Corte", cutoff_display)
 
 # =========================
-# ENTRENAMIENTO DEL MODELO
+# ENTRENAMIENTO
 # =========================
 st.subheader("Entrenamiento del modelo (MLP – PyTorch)")
 
-min_slider = 10 if len(df_model) >= 10 else 1
 sample_size = st.slider(
-    "Muestreo opcional de clientes para acelerar",
-    min_value=min_slider,
+    "Muestreo opcional",
+    min_value=10,
     max_value=len(df_model),
     value=min(100, len(df_model))
 )
@@ -329,89 +233,83 @@ if st.button("Entrenar modelo"):
     df_train = df_model.sample(sample_size, random_state=42)
 
     X = df_train.drop(columns=["churn"])
-    y = df_train["churn"].astype(int).values
+    y = df_train["churn"].values
 
-    num_cols = X.columns.tolist()
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-    preprocessor = ColumnTransformer(transformers=[("num", StandardScaler(), num_cols)])
-    X_proc = preprocessor.fit_transform(X)
-
-    # Si por algún motivo una clase queda vacía, quitamos stratify
-    strat = y if (len(np.unique(y)) == 2 and (y == 0).sum() >= 2 and (y == 1).sum() >= 2) else None
     X_train, X_test, y_train, y_test = train_test_split(
-        X_proc, y, test_size=0.3, random_state=42, stratify=strat
+        X_scaled, y, test_size=0.3, random_state=42, stratify=y if len(np.unique(y)) == 2 else None
     )
 
-    X_train = torch.„Registrar(X_train, dtype=antorcha.float32)
- X_test = antorcha.tensor(X_test, dtype=antorcha.float32)
- y_train = antorcha.tensor(y_tren.remodelar(-1, 1), dtype=antorcha.float32)
- y_test = antorcha.tensor(y_prueba.remodelar(-1, 1), dtype=antorcha.float32)
+    X_train = torch.tensor(X_train, dtype=torch.float32)
+    X_test = torch.tensor(X_test, dtype=torch.float32)
+    y_train = torch.tensor(y_train.reshape(-1, 1), dtype=torch.float32)
+    y_test = torch.tensor(y_test.reshape(-1, 1), dtype=torch.float32)
 
-    clase MLP(nn.Módulo):
-        def __inicio__(yo mismo, input_dim):
-            super().__inicio__()
- auto.neto = nn.Secuencial(
- nn.Lineal(entrada_dim, 64),
- nn.ReLU(),
- nn.Abandono(0,3),
- nn.Lineal(64, 32),
- nn.ReLU(),
- nn.Abandono(0,3),
- nn.Lineal(32, 1)
+    class MLP(nn.Module):
+        def __init__(self, n):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(n, 64),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(64, 32),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(32, 1)
             )
 
-        def adelante(yo mismo, x):
- retorno auto.neto(x)
+        def forward(self, x):
+            return self.net(x)
 
- modelo = MLP(X_tren.forma[1])
- criterio = nn.BCEWithLogitsLoss()
- optimizador = óptimo.Adán(modelo.parámetros(), lr=0,001)
+    model = MLP(X_train.shape[1])
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
 
- párdidas_tren, párdidas_val = [], []
+    train_losses, val_losses = [], []
 
- para _ en rango(12):
- modelo.tren()
- optimizador.grado_cero()
- pérdida = criterio(modelo(X_tren), y_tren)
- pérdida.hacia atrás()
- optimizador.paso()
+    for _ in range(12):
+        model.train()
+        optimizer.zero_grad()
+        loss = criterion(model(X_train), y_train)
+        loss.backward()
+        optimizer.step()
 
- modelo.eval()
- con antorcha.no_grad():
- val_pérdida = criterio(modelo(Prueba X_), y_prueba)
+        model.eval()
+        with torch.no_grad():
+            val_loss = criterion(model(X_test), y_test)
 
- pérdidas_trenes.append(pérdida.articulo())
- val_pérdidas.append(val_loss.articulo())
+        train_losses.append(loss.item())
+        val_losses.append(val_loss.item())
 
- modelo.eval()
- con antorcha.no_grad():
- logits = modelo(Prueba X_)
- problemas = antorcha.sigmoide(logits).numpy().ravel()
- preds = (problemas >= 0,5).astype(int)
+    model.eval()
+    with torch.no_grad():
+        probs = torch.sigmoid(model(X_test)).numpy().ravel()
+        preds = (probs >= 0.5).astype(int)
 
- acc = precisión_puntuación(y_test, preds)
- prec = puntuación_precisión(prueba_y, preds, división_cero=0)
- rec = recordar_puntuación(prueba_y, preds, división_cero=0)
- f1 = puntuación_f1(prueba_y, preds, división_cero=0)
- auc = puntuación roc_auc_(y_test, problemas) si len(np.sudónico(y_prueba.numpy().ravel())) == 2 else float("nan")
+    acc = accuracy_score(y_test, preds)
+    prec = precision_score(y_test, preds, zero_division=0)
+    rec = recall_score(y_test, preds, zero_division=0)
+    f1 = f1_score(y_test, preds, zero_division=0)
+    auc = roc_auc_score(y_test, probs) if len(np.unique(y_test)) == 2 else float("nan")
 
- st.éxito("Entretenimiento completo.")
+    st.success("Entrenamiento completado.")
 
- st.subencabezado("Métricas (prueba)")
- m1, m2, m3, m4, m5=st.columnas(5)
- m1.métrica("Precisión", f"{acc:. . . . .3fprec:")
- m2.métrica("Precisión", f"{prec:. . . . . .3f}")
- m3.métrica(„Registrador", f"{rec:. . .3f}")
- m4.métrica("F1", f"{f1:. . .3f}")
- m5.métrica(„ROC-AUC", f"{auc:. .3f}" si no np.isnan(auc) else "N/A")
+    st.subheader("Métricas")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Accuracy", f"{acc:.3f}")
+    m2.metric("Precision", f"{prec:.3f}")
+    m3.metric("Recall", f"{rec:.3f}")
+    m4.metric("F1", f"{f1:.3f}")
+    m5.metric("ROC-AUC", f"{auc:.3f}" if not np.isnan(auc) else "N/A")
 
- st.subencabezado("Matriz de confusión")
- cm = confusión_matriz(y_test, preds)
- st.marco(pd.Marco de datos(cm, columnas=["Pred 0", "Pred 1"], índice=[„Real 0", "Real 1"]))
+    st.subheader("Curvas de pérdida")
+    st.line_chart(pd.DataFrame({"train": train_losses, "val": val_losses}))
 
- st.subencabezado(„Curvas de pérdida")
- st.gráfico de líneas(pd.Marco de datos({"pérdida_tren": pérdidas_trenes, "val_pérdida": val_pérdidas}))
-
- st.subencabezado("Los principales clientes se enfrentan al alcalde Riesgo (prueba)")
- riesgo_df = pd.Marco de datos({"prob_churn": problemas}).ordenar_valores("prob_churn", ascendente=Falso)
- san marco(riesgo_df.cabeza(10))
+    st.subheader("Top clientes con mayor riesgo")
+    st.dataframe(
+        pd.DataFrame({"prob_churn": probs})
+        .sort_values("prob_churn", ascending=False)
+        .head(10)
+    )
