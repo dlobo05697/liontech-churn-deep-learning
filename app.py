@@ -232,8 +232,10 @@ sample_size = st.slider(
 if st.button("Entrenar modelo"):
     df_train = df_model.sample(sample_size, random_state=42)
 
-    X = df_train.drop(columns=["churn"])
-    y = df_train["churn"].values
+  client_ids = df_train["CodCliente"] if "CodCliente" in df_train.columns else None
+
+X = df_train.drop(columns=["churn", "CodCliente"], errors="ignore")
+y = df_train["churn"].values
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
